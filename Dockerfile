@@ -1,5 +1,18 @@
 FROM debian:12 AS build
 
+# Run in single layer to keep size down
+RUN apt-get update && apt-get upgrade -y &&\
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates python3-full python3-pip tzdata && \
+    python3 -m venv /venv && \
+    /venv/bin/pip install --upgrade pip
+
+# Build the virtualenv as a separate step: Only re-execute this step when requirements.txt changes
+FROM build AS build-venv
+COPY requirements.txt /requirements.txt
+RUN /venv/bin/pip install --disable-pip-version-check -r /requirements.txt
+
+FROM debian:12
+
 # ARGS invalidates cache, if any
 ARG TITLE
 ARG VCS_URL
@@ -13,18 +26,6 @@ LABEL org.opencontainers.image.source="${VCS_URL}"
 LABEL org.opencontainers.image.created="${BUILD_DATE}"
 LABEL org.opencontainers.image.version="${VERSION}"
 
-# Run in single layer to keep size down
-RUN apt-get update && apt-get upgrade -y &&\
-    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates python3-full python3-pip tzdata && \
-    python3 -m venv /venv && \
-    /venv/bin/pip install --upgrade pip
-
-# Build the virtualenv as a separate step: Only re-execute this step when requirements.txt changes
-FROM build AS build-venv
-COPY requirements.txt /requirements.txt
-RUN /venv/bin/pip install --disable-pip-version-check -r /requirements.txt
-
-FROM debian:12
 RUN apt-get update && apt-get upgrade -y &&\
     DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates python3-full python3-pip tzdata
 
