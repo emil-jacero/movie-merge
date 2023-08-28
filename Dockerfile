@@ -27,7 +27,7 @@ LABEL org.opencontainers.image.created="${BUILD_DATE}"
 LABEL org.opencontainers.image.version="${VERSION}"
 
 RUN apt-get update && apt-get upgrade -y &&\
-    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates python3-full python3-pip tzdata
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates python3-full python3-pip tzdata ffmpeg
 
 ENV TZ=Europe/Stockholm
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
