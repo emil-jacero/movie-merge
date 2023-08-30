@@ -27,7 +27,9 @@ LABEL org.opencontainers.image.created="${BUILD_DATE}"
 LABEL org.opencontainers.image.version="${VERSION}"
 
 RUN apt-get update && apt-get upgrade -y &&\
-    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates python3-full python3-pip tzdata ffmpeg
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates python3-full python3-pip tzdata ffmpeg imagemagick
+## Modify the ImageMagic policy.xml to allow usage.
+RUN sed -i 's/<policy domain="path" rights="none" pattern="@\*"\/>/<!-- <policy domain="path" rights="none" pattern="@\*"\/> -->/g' /etc/ImageMagick-6/policy.xml
 
 ENV TZ=Europe/Stockholm
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone

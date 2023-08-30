@@ -41,6 +41,13 @@ def getArguments():
                         default='',
                         help='Output directory')
 
+    parser.add_argument('-y',
+                        '--years',
+                        dest='years',
+                        type=str,
+                        default='',
+                        help='Comma separated list of years to process.')
+
     args = parser.parse_args()
     return args
 
@@ -129,11 +136,11 @@ def main():
 
     input_directory = Path(arguments.input)
     output_directory = Path(arguments.output)
+    years_list = arguments.years.split(",")
 
     # First, loop through each year sub-directory
     for year_directory in input_directory.iterdir():
-        if year_directory.is_dir() and year_directory.name.isdigit():  # Check if directory name represents a year
-
+        if year_directory.is_dir() and year_directory.name in years_list:  # Check if directory name represents a year and is in years_list
             # Loop through each sub-directory inside the year directory
             for sub_directory in year_directory.iterdir():
                 if sub_directory.is_dir():
@@ -178,22 +185,22 @@ def main():
 
                     # Create the main text clip
                     txt_clip = TextClip(title, fontsize=70, color='white', font="Arial").set_duration(5)
-                    shadow_clip = TextClip(title, fontsize=70, color='gray', font="Arial").set_duration(5)
+                    # shadow_clip = TextClip(title, fontsize=70, color='gray', font="Arial").set_duration(5)
                     
                     # Create the shadow text clip
                     offset = 1
                     # Positioning the clips
                     txt_position = ('center', 'center')
-                    shadow_position = (width/2 + offset, height/2 + offset)
+                    # shadow_position = (width/2 + offset, height/2 + offset)
                     txt_clip = txt_clip.set_position(txt_position)
-                    shadow_clip = shadow_clip.set_position(shadow_position)
+                    # shadow_clip = shadow_clip.set_position(shadow_position)
 
                     # Apply the fade out effect
                     fade_duration = 2  # Duration in seconds
                     txt_clip = txt_clip.crossfadeout(fade_duration)
-                    shadow_clip = shadow_clip.crossfadeout(fade_duration)
+                    # shadow_clip = shadow_clip.crossfadeout(fade_duration)
 
-                    video_with_text = CompositeVideoClip([first_clip, shadow_clip, txt_clip])
+                    video_with_text = CompositeVideoClip([first_clip, txt_clip])
                     # first_clip = concatenate_videoclips([first_clip.crossfadein(0.5).set_duration(first_clip.duration - 0.5), txt_clip.crossfadeout(0.5).set_duration(0.5)], method="compose")
 
                     clips = [VideoFileClip(str(video_file.video_path)) if not isinstance(video_file.video_path, VideoFileClip) else video_file.video_path for video_file in video_files]
