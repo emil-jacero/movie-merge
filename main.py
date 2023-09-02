@@ -216,6 +216,7 @@ def main():
                         str(temp_output_file_path), 
                         fps=output_fps, 
                         codec='libx265',
+                        thread=12,
                         ffmpeg_params=[
                             "-metadata", f"title={title}",
                             "-metadata", f"description={description}",
