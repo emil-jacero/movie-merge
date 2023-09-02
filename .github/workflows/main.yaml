@@ -6,10 +6,10 @@ on:
       - main
 
 env:
-  VERSION: "0.1.2"
+  VERSION: "0.1.3"
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  IMAGE_TAG: "ghcr.io/${{ github.actor }}/${{ github.event.repository.name }}:0.1.2"
+  IMAGE_TAG: "ghcr.io/${{ github.actor }}/${{ github.event.repository.name }}:0.1.3"
 
 jobs:
   build-and-push-image:
