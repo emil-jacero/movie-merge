@@ -48,6 +48,13 @@ def getArguments():
                         default='',
                         help='Comma separated list of years to process.')
 
+    parser.add_argument('-t',
+                        '--threads',
+                        dest='threads',
+                        type=str,
+                        default='1',
+                        help='Number of threads to use for ffmpeg. Can speed up the writing of the video on multicore computers.')
+
     args = parser.parse_args()
     return args
 
@@ -137,6 +144,7 @@ def main():
     input_directory = Path(arguments.input)
     output_directory = Path(arguments.output)
     years_list = arguments.years.split(",")
+    threads = arguments.threads
 
     # First, loop through each year sub-directory
     for year_directory in input_directory.iterdir():
@@ -216,7 +224,7 @@ def main():
                         str(temp_output_file_path), 
                         fps=output_fps, 
                         codec='libx265',
-                        thread=12,
+                        thread=threads,
                         ffmpeg_params=[
                             "-metadata", f"title={title}",
                             "-metadata", f"description={description}",
