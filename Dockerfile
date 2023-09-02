@@ -35,7 +35,7 @@ ENV TZ=Europe/Stockholm
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 COPY --from=build-venv /venv /venv
-RUN mkdir /app && groupadd -g 2000 app && useradd -m -s /bin/bash -d /app -g 2000 -u 1000 app
+RUN mkdir /app && groupadd -g 2000 app && useradd -m -s /bin/bash -d /app -g 2000 -u 2000 app
 ADD main.py /app/main.py
 RUN chown -R 2000:2000 /app
 
