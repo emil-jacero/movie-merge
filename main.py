@@ -1,3 +1,4 @@
+import multiprocessing
 import os
 import re
 import shutil
@@ -14,8 +15,12 @@ from moviepy.editor import (
 )
 
 
-def getArguments():
+def validate_thread_count(user_thread_count):
+    max_threads = multiprocessing.cpu_count()
+    if user_thread_count >= max_threads:
+        raise ValueError(f"Invalid thread count. The maximum available threads on this system is {max_threads}.")
 
+def getArguments():
     name = 'movie-merge'
     version = '0.1.0'
     parser = ArgumentParser(
@@ -56,11 +61,85 @@ def getArguments():
                         help='Number of threads to use for ffmpeg. Can speed up the writing of the video on multicore computers.')
 
     args = parser.parse_args()
+    try:
+        validate_thread_count(int(args.threads))
+    except ValueError as error:
+        print(error)
+        exit(1)
     return args
 
+class MergeVideo:
+    def __init__(self, video_path, threads) -> None:
+        super().__init__()
+        self.video_path: Path = video_path
+        self.file_name = self.video_path.name
+        self.file_ext = self.video_path.suffix
+        self.fps: float = self.get_fps()
+        self.mts_path = None
+        if self.file_ext.lower().endswith('.mts'):
+           self.convert_and_move(threads)
+
+    def get_fps(self):
+        cmd = [
+            'ffprobe', 
+            '-v', 'error',
+            '-select_streams', 'v:0',
+            '-show_entries', 'stream=avg_frame_rate',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            str(self.video_path)
+        ]
+
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if result.returncode != 0:
+            raise RuntimeError(f"Command '{' '.join(cmd)}' failed with error code {result.returncode}.")
+        fps_fraction = result.stdout.decode('utf-8').strip()
+
+        # Convert fps fraction to float
+        fps_split = fps_fraction.split('/')
+        if len(fps_split) == 3:
+            numerator, derp, denominator = fps_split
+        else:
+            numerator, denominator = fps_split
+        fps = float(numerator) / float(denominator)
+        return round(fps)
+
+    def move_mts_to_subdir(self, source):
+        mts_path = self.video_path
+
+        # Get the directory containing the MTS file
+        dir_path = mts_path.parent
+
+        # Create a new sub-directory named 'Processed_MTS'
+        processed_mts_dir = dir_path / "Processed_MTS"
+        os.makedirs(processed_mts_dir, exist_ok=True)
+
+        # Move the MTS file to the new sub-directory
+        new_path = processed_mts_dir / mts_path.name
+        try:
+            shutil.move(mts_path, new_path)
+        except OSError as e:
+            raise RuntimeError(f"Failed to move file from {mts_path} to {new_path}.") from e
+        self.mts_path = new_path
+
+    def convert_and_move(self, threads=1):
+        print(f"Converting .MTS file at {self.file_name} to .MP4...")
+        mts_path = self.video_path
+        mp4_path = self.video_path.with_suffix(".mp4")
+        cmd = ["ffmpeg", "-i", str(mts_path), "-vf", "'yadif'",  "-c:v", "libx265", "-c:a", "aac", "-threads", str(threads), str(mp4_path)]
+        result = subprocess.run(cmd)
+        if result.returncode != 0:
+            raise RuntimeError(f"Command '{' '.join(cmd)}' failed with error code {result.returncode}.")
+        
+        print(f"Moving .MTS file at {self.file_name} to Processed_MTS")
+        self.move_mts_to_subdir()
+        self.video_path = mp4_path
+    
+    def video_path_str(self):
+        return str(self.video_path)
+
 def get_video_files_in_directory(directory):
-    extensions = ['.MP4', '.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.MTS']  # Add or remove extensions as needed
-    return sorted([file for file in directory.iterdir() if file.suffix in extensions])
+    extensions = ['.MP4', '.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.mts']  # Add or remove extensions as needed
+    return sorted([file for file in directory.iterdir() if str(file.suffix).lower() in extensions])
 
 def sanitize_filename(title):
     # Strip out reserved words for Windows
@@ -74,166 +153,129 @@ def sanitize_filename(title):
     
     return title
 
-class MergeVideo:
-    def __init__(self, video_path) -> None:
-        super().__init__()
-        self.video_path: Path = video_path
-        self.file_name = self.video_path.name
-        self.file_ext = self.video_path.suffix
-        self.fps: float = self.get_fps()
-        self.mts_path = None
-        if self.file_ext.lower().endswith('.mts'):
-           self.convert_and_move()
-
-    def get_fps(self):
-        cmd = [
-            'ffprobe', 
-            '-v', 'error',
-            '-select_streams', 'v:0',
-            '-show_entries', 'stream=avg_frame_rate',
-            '-of', 'default=noprint_wrappers=1:nokey=1',
-            str(self.video_path)
-        ]
-
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        fps_fraction = result.stdout.decode('utf-8').strip()
-
-        # Convert fps fraction to float
-        fps_split = fps_fraction.split('/')
-        if len(fps_split) == 3:
-            numerator, derp, denominator = fps_split
-        else:
-            numerator, denominator = fps_split
-        fps = float(numerator) / float(denominator)
-        return round(fps)
-
-    def convert_mts_to_mp4(self):
-        mts_path = self.video_path
-        mp4_path = self.video_path.with_suffix(".mp4")
-        cmd = ["ffmpeg", "-i", str(mts_path), "-vf", "'yadif'",  "-c:v", "libx265", "-c:a", "aac", str(mp4_path)]
-        subprocess.run(cmd)
-        return mp4_path
+def get_directory_info(sub_directory):
+    # Split the sub-directory name to check for date and title
+    parts = sub_directory.name.split(' - ')
+    filmed_date = parts[0].strip()
+    title = parts[1] if len(parts) > 1 else ""
     
-    def move_mts_to_subdir(self):
-        mts_path = self.video_path
+    if not title:
+        return
+    title = sanitize_filename(title)
+    description = title  # If no Description in info.yaml, use the title as description
+    return title, description, filmed_date
 
-        # Get the directory containing the MTS file
-        dir_path = mts_path.parent
+def get_video_files(sub_directory, threads):
+    print("Start getting videos")
+    video_files_tmp = get_video_files_in_directory(sub_directory)
+    video_files = []
+    for file in video_files_tmp:
+        obj = MergeVideo(video_path=file, threads=threads)
+        video_files.append(obj)
+    return video_files
 
-        # Create a new sub-directory named 'Processed_MTS'
-        processed_mts_dir = dir_path / "Processed_MTS"
-        os.makedirs(processed_mts_dir, exist_ok=True)
+def burn_title_into_first_clip(video_file, title):
+    print("Burning title into first clip")
+    try:
+        first_clip = VideoFileClip(str(video_file.video_path))
+    except Exception as e:
+        raise RuntimeError(f"Failed to create video clip from file {video_file.video_path}.") from e
 
-        # Move the MTS file to the new sub-directory
-        new_path = processed_mts_dir / mts_path.name
-        shutil.move(mts_path, new_path)
-        self.mts_path = new_path
+    # Create the main text clip
+    txt_clip = TextClip(title, fontsize=70, color='white', font="Arial").set_duration(5)
+    txt_position = ('center', 'center')
+    txt_clip = txt_clip.set_position(txt_position)
 
-    def convert_and_move(self):
-        print(f"Converting .MTS file at {self.file_name} to .MP4...")
-        mp4_path = self.convert_mts_to_mp4()
-        
-        print(f"Moving .MTS file at {self.file_name} to Processed_MTS")
-        self.move_mts_to_subdir()
-        self.video_path = mp4_path
+    # Apply the fade out effect
+    fade_duration = 2  # Duration in seconds
+    txt_clip = txt_clip.crossfadeout(fade_duration)
+
+    video_with_text = CompositeVideoClip([first_clip, txt_clip])
+    return video_with_text
+
+def concatenate_clips(video_files, first_clip, title):
+    clips = [video_file.video_path_str for video_file in video_files]
+    clips[0] = first_clip
+    try:
+        final_clip = concatenate_videoclips(clips, method="compose")
+    except Exception as e:
+        raise RuntimeError(f"Failed to create video clip from file {title}.") from e
+    return final_clip
+
+def write_output_file(final_clip, output_file_path, output_fps, threads, title, description, filmed_date):
+    final_clip.write_videofile(
+        output_file_path, 
+        fps=output_fps, 
+        codec='libx265',
+        threads=threads,
+        ffmpeg_params=[
+            "-metadata", f"title={title}",
+            "-metadata", f"description={description}",
+            "-metadata", f"creation_time={filmed_date}T00:00:00"  # Setting time to midnight. Adjust if you have precise time.
+        ]
+    )
+
+def process_directory(sub_directory, output_directory, threads):
+    title, description, filmed_date = get_directory_info(sub_directory)
+    if get_directory_info is None:
+        print(f"Error: No title found for directory {sub_directory}. Skipping...")
+        return
+
+
+    output_file_name = f"{filmed_date} - {title}.mp4"
+    temp_output_file_path = output_directory / f"temp_{output_file_name}"
+    final_output_file_path = output_directory / output_file_name
+
+    if final_output_file_path.exists():
+        print(f"File {final_output_file_path} already exists. Skipping...")
+        return
+
+    print(f"Processing {filmed_date} - {title}")
+
+    video_files = get_video_files(sub_directory, threads)
+    first_clip = burn_title_into_first_clip(video_files[0], title)
+    final_clip = concatenate_clips(video_files, first_clip, title)
+
+    output_fps = video_files[0].fps
+    print(f"Writing file {final_output_file_path}. FPS: {output_fps}")
+    write_output_file(
+        final_clip,
+        str(temp_output_file_path),
+        output_fps,
+        threads,
+        title,
+        description,
+        filmed_date
+    )
+
+    temp_output_file_path.rename(final_output_file_path)
 
 def main():
-    # Arguments
     arguments = getArguments()
-
     input_directory = Path(arguments.input)
     output_directory = Path(arguments.output)
-    years_list = arguments.years.split(",")
+    years_list = [year.strip() for year in arguments.years.split(",") if year.strip()]
     threads = arguments.threads
 
-    # First, loop through each year sub-directory
+    print(arguments)
+
+    if not input_directory.exists():
+        raise FileNotFoundError(f"Input directory {input_directory} does not exist.")
+    if not output_directory.exists():
+        raise FileNotFoundError(f"Output directory {output_directory} does not exist.")
+    if not years_list:
+        raise ValueError("The year list is empty.")
+
+
     for year_directory in input_directory.iterdir():
-        if year_directory.is_dir() and year_directory.name in years_list:  # Check if directory name represents a year and is in years_list
-            # Loop through each sub-directory inside the year directory
+        if year_directory.is_dir() and year_directory.name in years_list:
             for sub_directory in year_directory.iterdir():
                 if sub_directory.is_dir():
-                    title = ""
-                    description = ""
+                    try:
+                        process_directory(sub_directory, output_directory, threads)
+                    except Exception as e:
+                        print(f"Error processing directory {sub_directory}: {e}")
 
-                    # Split the sub-directory name to check for date and title
-                    parts = sub_directory.name.split(' - ')
-                    filmed_date = parts[0].strip()
-                    title = parts[1] if len(parts) > 1 else ""
-
-                    # If still no title, print an error and continue to the next directory
-                    if not title:
-                        print(f"Error: No title found for directory {sub_directory}. Skipping...")
-                        continue
-                    title = sanitize_filename(title)
-                    
-                    # If no Description in info.yaml, use the title as description
-                    if not description and title:
-                        description = title
-                
-                    # Parse date from directory name and create output filename
-                    output_file_name = f"{filmed_date} - {title}.mp4"
-                    temp_output_file_path = output_directory / f"temp_{output_file_name}"
-                    final_output_file_path = output_directory / output_file_name
-
-                    # Check if the merged movie already exists
-                    if final_output_file_path.exists():
-                        print(f"File {final_output_file_path} already exists. Skipping...")
-                        continue
-
-                    video_files_tmp = get_video_files_in_directory(sub_directory)
-                    video_files = []
-                    for file in video_files_tmp:
-                        obj = MergeVideo(video_path=file)
-                        video_files.append(obj)
-
-                    # Burn title into the first video
-                    print("Burning title into first clip")
-                    first_clip = VideoFileClip(str(video_files[0].video_path))
-                    width, height = first_clip.size
-
-                    # Create the main text clip
-                    txt_clip = TextClip(title, fontsize=70, color='white', font="Arial").set_duration(5)
-                    # shadow_clip = TextClip(title, fontsize=70, color='gray', font="Arial").set_duration(5)
-                    
-                    # Create the shadow text clip
-                    offset = 1
-                    # Positioning the clips
-                    txt_position = ('center', 'center')
-                    # shadow_position = (width/2 + offset, height/2 + offset)
-                    txt_clip = txt_clip.set_position(txt_position)
-                    # shadow_clip = shadow_clip.set_position(shadow_position)
-
-                    # Apply the fade out effect
-                    fade_duration = 2  # Duration in seconds
-                    txt_clip = txt_clip.crossfadeout(fade_duration)
-                    # shadow_clip = shadow_clip.crossfadeout(fade_duration)
-
-                    video_with_text = CompositeVideoClip([first_clip, txt_clip])
-                    # first_clip = concatenate_videoclips([first_clip.crossfadein(0.5).set_duration(first_clip.duration - 0.5), txt_clip.crossfadeout(0.5).set_duration(0.5)], method="compose")
-
-                    clips = [VideoFileClip(str(video_file.video_path)) if not isinstance(video_file.video_path, VideoFileClip) else video_file.video_path for video_file in video_files]
-                    clips[0] = video_with_text
-                    final_clip = concatenate_videoclips(clips, method="compose")
-
-                    # Get the FPS from the first video in the list
-                    output_fps = video_files[0].fps
-
-                    # When writing the output video:
-                    print(f"Writing file {final_output_file_path}. FPS: {output_fps}")
-                    final_clip.write_videofile(
-                        str(temp_output_file_path), 
-                        fps=output_fps, 
-                        codec='libx265',
-                        threads=threads,
-                        ffmpeg_params=[
-                            "-metadata", f"title={title}",
-                            "-metadata", f"description={description}",
-                            "-metadata", f"creation_time={filmed_date}T00:00:00"  # Setting time to midnight. Adjust if you have precise time.
-                        ]
-                    )
-
-                    # Rename the temporary file to its final name
-                    temp_output_file_path.rename(final_output_file_path)
 
 if __name__ == '__main__':
     main()

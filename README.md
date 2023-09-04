@@ -42,5 +42,5 @@ docker buildx build --load \
 ## Run
 
 ```shell
-docker run --rm -it -v /path/to/video-files/directory:/folder emil-jacero/movie-merge:dev -i /folder -o /folder
+docker run --rm -it -v /path/to/video-files/directory:/folder emil-jacero/movie-merge:dev -i /input -o /output -y "2017,2018"
 ```
