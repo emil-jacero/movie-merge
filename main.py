@@ -295,6 +295,13 @@ def process_directory(sub_directory, output_directory, threads):
 
 def main():
     arguments = getArguments()
+    if arguments.log_level in log_levels.keys():
+        log_level = log_levels[arguments.log_level]
+    else:
+        log_level = INFO
+
+    log.setLevel(log_level)
+
     input_directory = Path(arguments.input)
     output_directory = Path(arguments.output)
     years_list = [year.strip() for year in arguments.years.split(",") if year.strip()]
