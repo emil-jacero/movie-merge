@@ -270,7 +270,7 @@ def process_directory(sub_directory, output_directory, threads):
     final_output_file_path = output_directory / output_file_name
 
     if final_output_file_path.exists():
-        log.error(f"File {final_output_file_path} already exists. Skipping...")
+        log.info(f"File {final_output_file_path} already exists. Skipping...")
         return
 
     log.info(f"Processing movie {filmed_date} - {title}")
@@ -305,18 +305,18 @@ def main():
     input_directory = Path(arguments.input)
     output_directory = Path(arguments.output)
     years_list = [year.strip() for year in arguments.years.split(",") if year.strip()]
+    sorted_years_list = sorted(years_list, key=lambda x: (x.isdigit(), x))
     threads = arguments.threads
 
     if not input_directory.exists():
         raise FileNotFoundError(f"Input directory {input_directory} does not exist.")
     if not output_directory.exists():
         raise FileNotFoundError(f"Output directory {output_directory} does not exist.")
-    if not years_list:
+    if not sorted_years_list:
         raise ValueError("The year list is empty.")
 
-
     for year_directory in input_directory.iterdir():
-        if year_directory.is_dir() and year_directory.name in years_list:
+        if year_directory.is_dir() and year_directory.name in sorted_years_list:
             for sub_directory in year_directory.iterdir():
                 if sub_directory.is_dir():
                     try:
