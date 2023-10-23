@@ -36,11 +36,11 @@ The `info.yaml` is optional.
 ```shell
 docker buildx build --load \
 --platform linux/amd64 \
---tag emil-jacero/movie-merge:dev .
+--tag movie-merge:dev .
 ```
 
 ## Run
 
 ```shell
-docker run --rm -it -v /path/to/video-files/directory:/input -v /path/to/video-files/directory:/output emil-jacero/movie-merge:dev -i /input -o /output -y "2017,2018" -t 2
+docker run --rm -it -v /path/to/video-files/directory:/input -v /path/to/video-files/directory:/output movie-merge:dev -i /input -o /output -y "2017,2018" -t 2
 ```
