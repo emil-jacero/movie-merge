@@ -195,12 +195,13 @@ def get_directory_info(sub_directory):
         title = parts[1]
     else:
         title = None
+    filmed_year = (parts[0].strip()).split('-')[0]
     
     if not title:
         return
     title = sanitize_filename(title)
     description = title  # Set the description to same as title, for now
-    return title, description, filmed_date
+    return title, description, filmed_date, filmed_year
 
 def get_video_files(sub_directory, threads):
     log.debug("Gathering video files")
@@ -250,7 +251,7 @@ def write_output_file(final_clip, output_file_path, output_fps, threads, title, 
     final_clip.write_videofile(
         output_file_path, 
         fps=output_fps, 
-        codec='libx265',
+        codec='libx264',
         threads=threads,
         ffmpeg_params=[
             "-metadata", f"title={title}",
@@ -260,11 +261,12 @@ def write_output_file(final_clip, output_file_path, output_fps, threads, title, 
     )
 
 def process_directory(sub_directory, output_directory, threads):
-    title, description, filmed_date = get_directory_info(sub_directory)
+    title, description, filmed_date, filmed_year = get_directory_info(sub_directory)
     if get_directory_info is None:
         log.error(f"No title found for directory {sub_directory}. Skipping...")
         return
 
+    nice_title = f"{filmed_year} - {title}"
     output_file_name = f"{filmed_date} - {title}.mp4"
     temp_output_file_path = output_directory / f"temp_{output_file_name}"
     final_output_file_path = output_directory / output_file_name
@@ -276,8 +278,8 @@ def process_directory(sub_directory, output_directory, threads):
     log.info(f"Processing movie {filmed_date} - {title}")
 
     video_files = get_video_files(sub_directory, threads)
-    first_clip = burn_title_into_first_clip(video_files[0], title)
-    final_clip = concatenate_clips(video_files, first_clip, title)
+    first_clip = burn_title_into_first_clip(video_files[0], nice_title)
+    final_clip = concatenate_clips(video_files, first_clip, nice_title)
 
     output_fps = video_files[0].fps
     log.info(f"Writing file {final_output_file_path}. FPS: {output_fps}")
@@ -286,7 +288,7 @@ def process_directory(sub_directory, output_directory, threads):
         str(temp_output_file_path),
         output_fps,
         threads,
-        title,
+        nice_title,
         description,
         filmed_date
     )
