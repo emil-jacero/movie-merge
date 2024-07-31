@@ -12,18 +12,17 @@ from pathlib import Path
 
 from moviepy.editor import VideoFileClip, concatenate_videoclips
 
-log = getLogger()
-log.setLevel(DEBUG)
+# Setup logging
+log = getLogger('movie-merge')
 logger_name = 'movie-merge'
 log_levels = {'DEBUG': DEBUG, 'INFO': INFO, 'WARNING': WARNING, 'ERROR': ERROR}
+
+# Default log level setup
+log.setLevel(DEBUG)  # Set the default level to DEBUG to allow filtering later
+stream_handler = StreamHandler()
 formatter = Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-log_handlers = [StreamHandler()]
-
-for handler in log_handlers:
-    handler.setFormatter(fmt=formatter)  # Set Formatter
-    log.addHandler(handler)  # Set Handler
-
-log.debug(f'Loaded these handlers: {log_handlers}')
+stream_handler.setFormatter(formatter)
+log.addHandler(stream_handler)
 
 from tools import (
     burn_title_into_first_clip,
@@ -178,7 +177,7 @@ class Clip:
 
         # Check if the current resolution is already 1920x1080
         if current_width == target_width and current_height == target_height:
-            log.info(f"Skipping resize for {self.file_name}, already 1920x1080.")
+            log.debug(f"Skipping resize for {self.file_name}, already 1920x1080.")
             return
 
         resized_path = self.video_path.with_name(f"resized_{self.video_path.name}")
@@ -197,7 +196,7 @@ class Clip:
             raise RuntimeError(f"Command '{' '.join(cmd)}' failed with error code {result.returncode}.")
 
         self.video_path = resized_path
-        log.info(f"Resized {self.file_name} to {target_width}x{target_height}")
+        log.debug(f"Resized {self.file_name} to {target_width}x{target_height}")
 
     def move_mts_to_subdir(self):
         mts_path = self.video_path
@@ -226,7 +225,7 @@ class Clip:
             "-y",  # Overwrite output files without asking
             "-i", str(mts_path), 
             "-vf", "'yadif'",  
-            "-c:v", "libx265", 
+            "-c:v", "libx264",  # Use H.264 codec
             "-c:a", "aac", 
             "-threads", str(threads), 
             str(mp4_path)
@@ -240,7 +239,6 @@ class Clip:
         self.video_path = mp4_path
         self.resize_video(self.target_resolution)  # Resize to target resolution after conversion
 
-
     def video_path_str(self):
         return str(self.video_path)
 
@@ -249,7 +247,6 @@ class Clip:
 
     def output_data(self):
         return { "video_path": f"{self.video_path}", "file_name": f"{self.file_name}", "file_ext": f"{self.file_ext}", "resolution": f"{self.resolution}", "fps": f"{self.fps}", "mts_path": f"{self.mts_path}"}
-
 
 def get_video_files(sub_directory, threads):
     log.debug("Gathering video files")
@@ -271,43 +268,53 @@ def concatenate_clips(clips, title):
     except Exception as e:
         raise RuntimeError(f"Failed to create video clip from file {title}.") from e
 
-def process_directory(sub_directory, output_directory, threads):
-    title, description, filmed_date, filmed_year = get_directory_info(sub_directory)
-    if get_directory_info is None:
-        log.error(f"No title found for directory {sub_directory}. Skipping...")
-        return
+# def process_directory(sub_directory, output_directory, threads):
+#     title, description, filmed_date, filmed_year = get_directory_info(sub_directory)
+#     if not title:
+#         log.error(f"No title found for directory {sub_directory}. Skipping...")
+#         return
 
-    nice_title = f"{filmed_year} - {title}"
-    output_file_name = f"{filmed_date} - {title}.mp4"
-    temp_output_file_path = output_directory / f"temp_{output_file_name}"
-    final_output_file_path = output_directory / output_file_name
+#     nice_title = f"{filmed_year} - {title}"
+#     output_file_name = f"{filmed_date} - {title}.mp4"
+#     temp_output_file_path = output_directory / f"temp_{output_file_name}"
+#     final_output_file_path = output_directory / output_file_name
 
-    if final_output_file_path.exists():
-        log.info(f"File {final_output_file_path} already exists. Skipping...")
-        return
+#     if final_output_file_path.exists():
+#         log.info(f"File {final_output_file_path} already exists. Skipping...")
+#         return
 
-    log.info(f"Processing movie {filmed_date} - {title}")
+#     log.info(f"Processing movie '{nice_title}' from directory {sub_directory}")
 
-    video_files = get_video_files(sub_directory, threads)
+#     video_files = get_video_files(sub_directory, threads)
+#     sorted_video_files = sort_clips_by_date(video_files)
+#     rename_clips(sorted_video_files)
 
-    intro_clip = burn_title_into_first_clip(video_files[0], nice_title)
-    clips = [VideoFileClip(video_file.video_path_str()) for video_file in video_files]
-    clips.insert(0, intro_clip)
-    final_clip = concatenate_clips(clips, nice_title)
+#     # Only log detailed clip info if at debug level
+#     if log.getEffectiveLevel() == DEBUG:
+#         for clip in sorted_video_files:
+#             log.debug(f"Working on clip: {clip.file_name} with path: {clip.video_path}")
+#     else:
+#         for clip in sorted_video_files:
+#             log.info(f"Processing clip: {clip.file_name}")
 
-    output_fps = video_files[0].fps
-    log.info(f"Writing file {final_output_file_path}. FPS: {output_fps}")
-    write_output_file(
-        final_clip,
-        str(temp_output_file_path),
-        output_fps,
-        threads,
-        nice_title,
-        description,
-        filmed_date
-    )
+#     intro_clip = burn_title_into_first_clip(video_files[0], nice_title)
+#     clips = [VideoFileClip(video_file.video_path_str()) for video_file in video_files]
+#     clips.insert(0, intro_clip)
+#     final_clip = concatenate_clips(clips, nice_title)
 
-    temp_output_file_path.rename(final_output_file_path)
+#     output_fps = video_files[0].fps
+#     log.info(f"Writing file {final_output_file_path}. FPS: {output_fps}")
+#     write_output_file(
+#         final_clip,
+#         str(temp_output_file_path),
+#         output_fps,
+#         threads,
+#         nice_title,
+#         description,
+#         filmed_date
+#     )
+
+#     temp_output_file_path.rename(final_output_file_path)
 
 def write_output_file(final_clip, output_file_path, output_fps, threads, title, description, filmed_date):
     final_clip.write_videofile(
@@ -375,10 +382,50 @@ def main():
                     try:
                         video_files = get_video_files(sub_directory, threads)
                         sorted_video_files = sort_clips_by_date(video_files)
-                        rename_clips(sorted_video_files)
+                        rename_clips(sorted_video_files)  # Rename first based on sorted order
+
+                        # Start processing clips
+                        log.info(f"Starting processing for directory {sub_directory}")
                         process_directory(sub_directory, output_directory, threads)
                     except Exception as e:
                         log.error(f"Error processing directory {sub_directory}: {e}")
+
+def process_directory(sub_directory, output_directory, threads):
+    title, description, filmed_date, filmed_year = get_directory_info(sub_directory)
+    if not title:
+        log.error(f"No title found for directory {sub_directory}. Skipping...")
+        return
+
+    nice_title = f"{filmed_year} - {title}"
+    output_file_name = f"{filmed_date} - {title}.mp4"
+    temp_output_file_path = output_directory / f"temp_{output_file_name}"
+    final_output_file_path = output_directory / output_file_name
+
+    if final_output_file_path.exists():
+        log.info(f"File {final_output_file_path} already exists. Skipping...")
+        return
+
+    log.info(f"Processing movie '{nice_title}' from directory {sub_directory}")
+
+    video_files = get_video_files(sub_directory, threads)  # Already renamed and sorted
+    intro_clip = burn_title_into_first_clip(video_files[0], nice_title)
+    clips = [VideoFileClip(video_file.video_path_str()) for video_file in video_files]
+    clips.insert(0, intro_clip)
+    final_clip = concatenate_clips(clips, nice_title)
+
+    output_fps = video_files[0].fps
+    log.info(f"Writing file {final_output_file_path}. FPS: {output_fps}")
+    write_output_file(
+        final_clip,
+        str(temp_output_file_path),
+        output_fps,
+        threads,
+        nice_title,
+        description,
+        filmed_date
+    )
+
+    temp_output_file_path.rename(final_output_file_path)
 
 if __name__ == '__main__':
     main()
