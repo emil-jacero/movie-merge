@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 from argparse import ArgumentParser
+from datetime import datetime
 from logging import (
     DEBUG,
     ERROR,
@@ -17,12 +18,56 @@ from logging import (
     StreamHandler,
     getLogger,
 )
+from pathlib import Path
 
+import exifread
 from moviepy.editor import CompositeVideoClip, TextClip, VideoFileClip
 from moviepy.video.fx.all import resize
 
 log = getLogger()
 logger_name = 'movie-merge-tools'
+
+def extract_datetime(file_path):
+    """
+    Extracts the datetime from the metadata of a file.
+    First attempts to use the file's creation date from metadata, then falls back to EXIF data.
+    """
+    def get_creation_date_from_metadata(file_path):
+        cmd = [
+            'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+            '-show_entries', 'format_tags=creation_time', '-of', 'default=noprint_wrappers=1:nokey=1', str(file_path)
+        ]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+        return None
+
+    def get_creation_date_from_exif(file_path):
+        with open(file_path, 'rb') as f:
+            tags = exifread.process_file(f)
+            date_tag = tags.get('EXIF DateTimeOriginal') or tags.get('Image DateTime')
+            if date_tag:
+                return date_tag.values
+        return None
+
+    # Attempt to extract creation date from metadata
+    creation_date = get_creation_date_from_metadata(file_path)
+    if creation_date:
+        try:
+            return datetime.fromisoformat(creation_date)
+        except ValueError:
+            pass  # Handle incorrect format if necessary
+
+    # Fallback to extracting date from EXIF data
+    exif_date = get_creation_date_from_exif(file_path)
+    if exif_date:
+        try:
+            return datetime.strptime(exif_date, '%Y:%m:%d %H:%M:%S')
+        except ValueError:
+            pass  # Handle incorrect format if necessary
+
+    # Final fallback to file's modification time
+    return datetime.fromtimestamp(file_path.stat().st_mtime)
 
 def sanitize_filename(title):
     """Sanitize the filename by replacing reserved words and characters."""
@@ -59,33 +104,6 @@ def get_directory_info(sub_directory):
     title = sanitize_filename(title)
     description = title  # Set the description to same as title, for now
     return title, description, filmed_date, filmed_year
-
-def resolution_mismatch(video_files):
-    """
-    Checks if all video files have the same resolution.
-    Returns True if there's a mismatch.
-    """
-    resolutions = set()
-    
-    for video_file in video_files:
-        clip = VideoFileClip(video_file.video_path_str())
-        resolutions.add((clip.w, clip.h))
-        clip.close()  # Close the clip to avoid consuming system resources.
-    
-    return len(resolutions) > 1  # Mismatch exists if we have more than one resolution.
-
-def find_largest_resolution(video_files):
-    max_width = 0
-    max_height = 0
-    
-    for file in video_files:
-        width, height = file.resolution
-        if width > max_width:
-            max_width = width
-        if height > max_height:
-            max_height = height
-            
-    return max_width, max_height
 
 def burn_title_into_first_clip(video_file, title):
     log.info("Burning title into first clip")
