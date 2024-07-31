@@ -1,29 +1,15 @@
+# main.py
+
 import json
 import multiprocessing
 import os
-import re
 import shutil
 import subprocess
 from argparse import ArgumentParser
-from logging import (
-    DEBUG,
-    ERROR,
-    INFO,
-    WARNING,
-    FileHandler,
-    Formatter,
-    StreamHandler,
-    getLogger,
-)
+from logging import DEBUG, ERROR, INFO, WARNING, Formatter, StreamHandler, getLogger
 from pathlib import Path
 
-import yaml
-from moviepy.editor import (
-    CompositeVideoClip,
-    TextClip,
-    VideoFileClip,
-    concatenate_videoclips,
-)
+from moviepy.editor import VideoFileClip, concatenate_videoclips
 
 log = getLogger()
 log.setLevel(DEBUG)
@@ -37,6 +23,15 @@ for handler in log_handlers:
     log.addHandler(handler)  # Set Handler
 
 log.debug(f'Loaded these handlers: {log_handlers}')
+
+from tools import (
+    burn_title_into_first_clip,
+    find_largest_resolution,
+    get_directory_info,
+    get_video_files_in_directory,
+    resolution_mismatch,
+)
+
 
 def validate_thread_count(user_thread_count):
     max_threads = multiprocessing.cpu_count()
@@ -98,16 +93,36 @@ def getArguments():
         exit(1)
     return args
 
-class MergeVideo:
+class Clip:
     def __init__(self, video_path, threads) -> None:
         super().__init__()
         self.video_path: Path = video_path
         self.file_name = self.video_path.name
         self.file_ext = self.video_path.suffix
+        self.resolution: tuple = self.get_resolution()
         self.fps: float = self.get_fps()
+        self.target_resolution = (1920, 1080)
         self.mts_path = None
         if self.file_ext.lower().endswith('.mts'):
            self.convert_and_move(threads)
+        else:
+            self.resize_video(self.target_resolution)  # Always resize to target resolution
+
+    def get_resolution(self):
+        cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-select_streams', 'v:0',
+            '-show_entries', 'stream=width,height',
+            '-of', 'csv=p=0',
+            str(self.video_path)
+        ]
+
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if result.returncode != 0:
+            raise RuntimeError(f"Command '{' '.join(cmd)}' failed with error code {result.returncode}.")
+        width, height = map(int, result.stdout.decode('utf-8').strip().split(","))
+        return (width, height)
 
     def get_fps(self):
         cmd = [
@@ -132,6 +147,26 @@ class MergeVideo:
             numerator, denominator = fps_split
         fps = float(numerator) / float(denominator)
         return round(fps)
+
+    def resize_video(self, target_resolution):
+        target_width, target_height = target_resolution
+        resized_path = self.video_path.with_name(f"resized_{self.video_path.name}")
+
+        cmd = [
+            'ffmpeg',
+            '-i', str(self.video_path),
+            '-vf', f'scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2',
+            '-c:a', 'copy',
+            str(resized_path)
+        ]
+
+        result = subprocess.run(cmd)
+
+        if result.returncode != 0:
+            raise RuntimeError(f"Command '{' '.join(cmd)}' failed with error code {result.returncode}.")
+
+        self.video_path = resized_path
+        log.info(f"Resized {self.file_name} to {target_width}x{target_height}")
 
     def move_mts_to_subdir(self):
         mts_path = self.video_path
@@ -159,106 +194,41 @@ class MergeVideo:
         result = subprocess.run(cmd)
         if result.returncode != 0:
             raise RuntimeError(f"Command '{' '.join(cmd)}' failed with error code {result.returncode}.")
-        
+
         log.info(f"Moving .MTS file at {self.file_name} to Processed_MTS")
         self.move_mts_to_subdir()
         self.video_path = mp4_path
-    
+        self.resize_video(self.target_resolution)  # Resize to target resolution after conversion
+
     def video_path_str(self):
         return str(self.video_path)
 
-def get_video_files_in_directory(directory):
-    extensions = ['.MP4', '.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.mts']  # Add or remove extensions as needed
-    return sorted([file for file in directory.iterdir() if str(file.suffix).lower() in extensions])
+    def delete_video(self):
+        os.remove(self.video_path)
 
-def sanitize_filename(title):
-    """Sanitize the filename by replacing reserved words and characters."""
-    
-    # Strip out reserved words for Windows
-    title = re.sub(r'(?i)\b(con|prn|aux|nul|com[0-9]|lpt[0-9])\b', '_', title)
+    def output_data(self):
+        return { "video_path": f"{self.video_path}", "file_name": f"{self.file_name}", "file_ext": f"{self.file_ext}", "resolution": f"{self.resolution}", "fps": f"{self.fps}", "mts_path": f"{self.mts_path}"}
 
-    # Replace reserved characters with underscore
-    title = re.sub(r'[\/\\\?\%\*\:\|\\"\<\>\.]', '_', title)
-
-    # Remove leading/trailing dots and spaces
-    title = title.strip('. ')
-
-    return title
-
-def get_directory_info(sub_directory):
-    # Split the sub-directory name to check for date and title
-    parts = sub_directory.name.split(' - ')
-    filmed_date = parts[0].strip()
-    if len(parts) == 3:
-        title = f"{ parts[1]} - { parts[2]}"
-    elif len(parts) == 2:
-        title = parts[1]
-    else:
-        title = None
-    filmed_year = (parts[0].strip()).split('-')[0]
-    
-    if not title:
-        return
-    title = sanitize_filename(title)
-    description = title  # Set the description to same as title, for now
-    return title, description, filmed_date, filmed_year
 
 def get_video_files(sub_directory, threads):
     log.debug("Gathering video files")
     video_files_tmp = get_video_files_in_directory(sub_directory)
-    str_files = [file.name for file in video_files_tmp]
-    log.debug(json.dumps(str_files))
 
     video_files = []
     for file in video_files_tmp:
-        obj = MergeVideo(video_path=file, threads=threads)
+        obj = Clip(video_path=file, threads=threads)
         video_files.append(obj)
+        log.debug(obj.output_data())
     return video_files
 
-def burn_title_into_first_clip(video_file, title):
-    log.info("Burning title into first clip")
-
-    # Create the main text clip
-    try:
-        first_clip = VideoFileClip(str(video_file.video_path))
-        txt_clip = TextClip(title, fontsize=70, color='white', font="Arial").set_duration(5)
-        txt_position = ('center', 'center')
-        txt_clip = txt_clip.set_position(txt_position)
-
-        # Apply the fade out effect
-        fade_duration = 2  # Duration in seconds
-        txt_clip = txt_clip.crossfadeout(fade_duration)
-
-        video_with_text = CompositeVideoClip([first_clip, txt_clip])
-    except Exception as e:
-        # raise Exception(e)
-        raise RuntimeError(f"Failed to create video file with burned in text from file {str(video_file.video_path)}.") from e
-
-    return video_with_text
-
-def concatenate_clips(video_files, first_clip, title):
+def concatenate_clips(clips, title):
     log.debug("Merging video files")
-    clips = [VideoFileClip(video_file.video_path_str()) for video_file in video_files]
-    clips[0] = first_clip
+
     try:
         final_clip = concatenate_videoclips(clips, method="compose")
+        return final_clip
     except Exception as e:
-        # raise Exception(e)
         raise RuntimeError(f"Failed to create video clip from file {title}.") from e
-    return final_clip
-
-def write_output_file(final_clip, output_file_path, output_fps, threads, title, description, filmed_date):
-    final_clip.write_videofile(
-        output_file_path, 
-        fps=output_fps, 
-        codec='libx264',
-        threads=threads,
-        ffmpeg_params=[
-            "-metadata", f"title={title}",
-            "-metadata", f"description={description}",
-            "-metadata", f"creation_time={filmed_date}T00:00:00"  # Setting time to midnight. Adjust if you have precise time.
-        ]
-    )
 
 def process_directory(sub_directory, output_directory, threads):
     title, description, filmed_date, filmed_year = get_directory_info(sub_directory)
@@ -278,8 +248,17 @@ def process_directory(sub_directory, output_directory, threads):
     log.info(f"Processing movie {filmed_date} - {title}")
 
     video_files = get_video_files(sub_directory, threads)
-    first_clip = burn_title_into_first_clip(video_files[0], nice_title)
-    final_clip = concatenate_clips(video_files, first_clip, nice_title)
+    # mismatch_found = resolution_mismatch(video_files)  # Check resolution mismatch
+    # if mismatch_found:
+    #     log.debug("Resolution mismatch found. Resizing clips")
+    #     # largest_resolution = find_largest_resolution(video_files)
+    #     largest_resolution = (1920, 1080)
+    #     video_files = [clip.resize_video(largest_resolution) for clip in video_files]
+
+    intro_clip = burn_title_into_first_clip(video_files[0], nice_title)
+    clips = [VideoFileClip(video_file.video_path_str()) for video_file in video_files]
+    clips.insert(0, intro_clip)
+    final_clip = concatenate_clips(clips, nice_title)
 
     output_fps = video_files[0].fps
     log.info(f"Writing file {final_output_file_path}. FPS: {output_fps}")
@@ -294,6 +273,21 @@ def process_directory(sub_directory, output_directory, threads):
     )
 
     temp_output_file_path.rename(final_output_file_path)
+
+def write_output_file(final_clip, output_file_path, output_fps, threads, title, description, filmed_date):
+    final_clip.write_videofile(
+        output_file_path, 
+        fps=output_fps, 
+        codec="libx264",
+        preset="fast",
+        threads=threads,
+        write_logfile=False,
+        ffmpeg_params=[
+            "-metadata", f"title={title}",
+            "-metadata", f"description={description}",
+            "-metadata", f"creation_time={filmed_date}T00:00:00"  # Setting time to midnight. Adjust if you have precise time.
+        ]
+    )
 
 def main():
     arguments = getArguments()

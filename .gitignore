@@ -149,3 +149,4 @@ config.yml
 testing.py
 *.mp3
 test.py
+output.txt
