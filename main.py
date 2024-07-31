@@ -3,6 +3,7 @@
 import json
 import multiprocessing
 import os
+import re
 import shutil
 import subprocess
 from argparse import ArgumentParser
@@ -94,6 +95,22 @@ def getArguments():
     return args
 
 class Clip:
+    def get_creation_date(self):
+        cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-show_entries', 'format_tags=creation_time',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            str(self.video_path)
+        ]
+        
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if result.returncode != 0:
+            raise RuntimeError(f"Command '{' '.join(cmd)}' failed with error code {result.returncode}.")
+        
+        creation_date = result.stdout.decode('utf-8').strip()
+        return creation_date
+
     def __init__(self, video_path, threads) -> None:
         super().__init__()
         self.video_path: Path = video_path
@@ -103,6 +120,7 @@ class Clip:
         self.fps: float = self.get_fps()
         self.target_resolution = (1920, 1080)
         self.mts_path = None
+        self.creation_date = self.get_creation_date()
         if self.file_ext.lower().endswith('.mts'):
            self.convert_and_move(threads)
         else:
@@ -121,7 +139,13 @@ class Clip:
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if result.returncode != 0:
             raise RuntimeError(f"Command '{' '.join(cmd)}' failed with error code {result.returncode}.")
-        width, height = map(int, result.stdout.decode('utf-8').strip().split(","))
+        output = result.stdout.decode('utf-8').strip()
+        try:
+            # Split output by lines and use the first non-empty line
+            first_line = next(line for line in output.splitlines() if line.strip())
+            width, height = map(int, first_line.split(","))
+        except ValueError:
+            raise ValueError(f"Unexpected output format from ffprobe: {output}")
         return (width, height)
 
     def get_fps(self):
@@ -150,6 +174,13 @@ class Clip:
 
     def resize_video(self, target_resolution):
         target_width, target_height = target_resolution
+        current_width, current_height = self.resolution
+
+        # Check if the current resolution is already 1920x1080
+        if current_width == target_width and current_height == target_height:
+            log.info(f"Skipping resize for {self.file_name}, already 1920x1080.")
+            return
+
         resized_path = self.video_path.with_name(f"resized_{self.video_path.name}")
 
         cmd = [
@@ -190,7 +221,16 @@ class Clip:
         log.info(f"Converting .MTS file at {self.file_name} to .MP4...")
         mts_path = self.video_path
         mp4_path = self.video_path.with_suffix(".mp4")
-        cmd = ["ffmpeg", "-i", str(mts_path), "-vf", "'yadif'",  "-c:v", "libx265", "-c:a", "aac", "-threads", str(threads), str(mp4_path)]
+        cmd = [
+            "ffmpeg", 
+            "-y",  # Overwrite output files without asking
+            "-i", str(mts_path), 
+            "-vf", "'yadif'",  
+            "-c:v", "libx265", 
+            "-c:a", "aac", 
+            "-threads", str(threads), 
+            str(mp4_path)
+        ]
         result = subprocess.run(cmd)
         if result.returncode != 0:
             raise RuntimeError(f"Command '{' '.join(cmd)}' failed with error code {result.returncode}.")
@@ -199,6 +239,7 @@ class Clip:
         self.move_mts_to_subdir()
         self.video_path = mp4_path
         self.resize_video(self.target_resolution)  # Resize to target resolution after conversion
+
 
     def video_path_str(self):
         return str(self.video_path)
@@ -248,12 +289,6 @@ def process_directory(sub_directory, output_directory, threads):
     log.info(f"Processing movie {filmed_date} - {title}")
 
     video_files = get_video_files(sub_directory, threads)
-    # mismatch_found = resolution_mismatch(video_files)  # Check resolution mismatch
-    # if mismatch_found:
-    #     log.debug("Resolution mismatch found. Resizing clips")
-    #     # largest_resolution = find_largest_resolution(video_files)
-    #     largest_resolution = (1920, 1080)
-    #     video_files = [clip.resize_video(largest_resolution) for clip in video_files]
 
     intro_clip = burn_title_into_first_clip(video_files[0], nice_title)
     clips = [VideoFileClip(video_file.video_path_str()) for video_file in video_files]
@@ -289,6 +324,28 @@ def write_output_file(final_clip, output_file_path, output_fps, threads, title, 
         ]
     )
 
+def sort_clips_by_date(clips):
+    return sorted(clips, key=lambda clip: clip.creation_date)
+
+def rename_clips(clips):
+    for index, clip in enumerate(clips):
+        # Check if the file is already renamed according to the pattern
+        if re.match(r"^\d{4}_", clip.file_name):
+            log.info(f"File {clip.file_name} is already renamed, skipping.")
+            continue
+
+        # Generate the new filename with a four-digit number and the original file name
+        new_file_name = f"{index+1:04d}_{clip.file_name}"
+        new_file_path = clip.video_path.with_name(new_file_name)
+
+        # Rename the file in place
+        os.rename(clip.video_path, new_file_path)
+
+        # Update the clip's video_path to the new path
+        clip.video_path = new_file_path
+
+        log.info(f"Renamed file {clip.file_name} to {new_file_name}")
+
 def main():
     arguments = getArguments()
     if arguments.log_level in log_levels.keys():
@@ -302,7 +359,7 @@ def main():
     output_directory = Path(arguments.output)
     years_list = [year.strip() for year in arguments.years.split(",") if year.strip()]
     sorted_years_list = sorted(years_list, key=lambda x: (x.isdigit(), x))
-    threads = arguments.threads
+    threads = int(arguments.threads)
 
     if not input_directory.exists():
         raise FileNotFoundError(f"Input directory {input_directory} does not exist.")
@@ -316,10 +373,12 @@ def main():
             for sub_directory in year_directory.iterdir():
                 if sub_directory.is_dir():
                     try:
+                        video_files = get_video_files(sub_directory, threads)
+                        sorted_video_files = sort_clips_by_date(video_files)
+                        rename_clips(sorted_video_files)
                         process_directory(sub_directory, output_directory, threads)
                     except Exception as e:
                         log.error(f"Error processing directory {sub_directory}: {e}")
-
 
 if __name__ == '__main__':
     main()
