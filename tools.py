@@ -1,31 +1,15 @@
-# tools.py
+### tools.py
 
-import json
-import multiprocessing
-import os
 import re
-import shutil
 import subprocess
 from argparse import ArgumentParser
 from datetime import datetime
-from logging import (
-    DEBUG,
-    ERROR,
-    INFO,
-    WARNING,
-    FileHandler,
-    Formatter,
-    StreamHandler,
-    getLogger,
-)
-from pathlib import Path
+from logging import getLogger
 
 import exifread
-from moviepy.editor import CompositeVideoClip, TextClip, VideoFileClip
-from moviepy.video.fx.all import resize
+from moviepy.editor import CompositeVideoClip, TextClip, concatenate_videoclips
 
-log = getLogger()
-logger_name = 'movie-merge-tools'
+log = getLogger('movie-merge')
 
 def extract_datetime(file_path):
     """
@@ -84,33 +68,65 @@ def sanitize_filename(title):
     return title
 
 def get_video_files_in_directory(directory):
-    extensions = ['.MP4', '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.mts']  # Add or remove extensions as needed
+    extensions = ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.mts']
     return sorted([file for file in directory.iterdir() if str(file.suffix).lower() in extensions])
 
 def get_directory_info(sub_directory):
-    # Split the sub-directory name to check for date and title
-    parts = sub_directory.name.split(' - ')
-    filmed_date = parts[0].strip()
-    if len(parts) == 3:
-        title = f"{ parts[1]} - { parts[2]}"
-    elif len(parts) == 2:
-        title = parts[1]
-    else:
-        title = None
-    filmed_year = (parts[0].strip()).split('-')[0]
-    
-    if not title:
-        return
-    title = sanitize_filename(title)
-    description = title  # Set the description to same as title, for now
-    return title, description, filmed_date, filmed_year
+    # Skip if directory name is "ProcessedClips"
+    if sub_directory.name == "ProcessedClips":
+        return None, None, None, None
 
-def burn_title_into_first_clip(video_file, title):
+    # Extract the last component of the directory name
+    dir_name = sub_directory.name
+    
+    # Attempt to split the directory name by ' - ' to separate the date and title
+    parts = dir_name.split(' - ')
+    log.debug(f"Parts: {parts}")
+    
+    # The first part should be the date
+    filmed_date = parts[0].strip()
+    log.debug(f"Filmed date: {filmed_date}")
+    
+    # Extract the year from the date
+    filmed_year = filmed_date.split('-')[0]
+    log.debug(f"Filmed year: {filmed_year}")
+    
+    # Validate the date format (basic validation assuming YYYY-MM-DD)
+    if not re.match(r'^\d{4}-\d{2}-\d{2}$', filmed_date):
+        return None, None, None, None
+    
+    # If no title is provided, set both title and nice_title to filmed_date
+    if len(parts) == 1:
+        title = filmed_date
+        nice_title = filmed_date
+        log.debug(f"Title: {title}, Nice title: {nice_title}")
+    else:
+        title = sanitize_filename(parts[1])
+        nice_title = f"{filmed_date} - {title}"
+        log.debug(f"Title: {title}, Nice title: {nice_title}")
+    
+    return title, nice_title, filmed_date, filmed_year
+
+def create_title_card(title):
+    log.info("Creating title card for new chapter with title: " + title)
+
+    try:
+        txt_clip = TextClip(title, fontsize=70, color='white', font="Arial").set_duration(5)
+        txt_position = ('center', 'center')
+        txt_clip = txt_clip.set_position(txt_position)
+
+        # Apply fade-in and fade-out effects
+        fade_duration = 2  # Duration in seconds
+        txt_clip = txt_clip.crossfadein(fade_duration).crossfadeout(fade_duration)
+
+        return txt_clip
+    except Exception as e:
+        raise RuntimeError(f"Failed to create title card for {title}.") from e
+
+def burn_title_into_clip(video_clip, title):
     log.info("Burning title into first clip")
 
-    # Create the main text clip
     try:
-        first_clip = VideoFileClip(str(video_file.video_path))
         txt_clip = TextClip(title, fontsize=70, color='white', font="Arial").set_duration(5)
         txt_position = ('center', 'center')
         txt_clip = txt_clip.set_position(txt_position)
@@ -119,9 +135,38 @@ def burn_title_into_first_clip(video_file, title):
         fade_duration = 2  # Duration in seconds
         txt_clip = txt_clip.crossfadeout(fade_duration)
 
-        video_with_text = CompositeVideoClip([first_clip, txt_clip])
+        video_with_text = CompositeVideoClip([video_clip, txt_clip])
+        return video_with_text
     except Exception as e:
-        # raise Exception(e)
-        raise RuntimeError(f"Failed to create video file with burned in text from file {str(video_file.video_path)}.") from e
+        log.error(f"Failed to create video file with burned in text: {str(e)}")
+        raise RuntimeError(f"Failed to create video file with burned in text.") from e
 
-    return video_with_text
+def concatenate_clips(video_clips, first_clip, title):
+    log.debug("Merging video files")
+    try:
+        all_clips = [first_clip] + video_clips
+        final_clip = concatenate_videoclips(all_clips, method="compose")
+        return final_clip
+    except Exception as e:
+        log.error(f"Failed to create video clip from file {title}: {str(e)}")
+        raise RuntimeError(f"Failed to create video clip from file {title}.") from e
+
+def write_output_file(final_clip, output_file_path, output_fps, threads, title, filmed_date):
+    final_clip.write_videofile(
+        output_file_path, 
+        fps=output_fps, 
+        codec="libx264",
+        preset="fast",
+        threads=threads,
+        write_logfile=False,
+        ffmpeg_params=[
+            "-metadata", f"title={title}",
+            "-metadata", f"description={title}",
+            "-metadata", f"creation_time={filmed_date}T00:00:00"  # Setting time to midnight. Adjust if you have precise time.
+        ]
+    )
+
+def sort_clips_by_date(clips):
+    for clip in clips:
+        log.debug(f"Sorting clip: {clip.file_name}, creation_date: {clip.creation_date}, type: {type(clip.creation_date)}")
+    return sorted(clips, key=lambda clip: clip.creation_date)

@@ -1,6 +1,8 @@
-# main.py
+### main.py
 
+import csv
 import json
+import logging
 import multiprocessing
 import os
 import re
@@ -10,12 +12,12 @@ from argparse import ArgumentParser
 from logging import DEBUG, ERROR, INFO, WARNING, Formatter, StreamHandler, getLogger
 from pathlib import Path
 
-from moviepy.editor import VideoFileClip, concatenate_videoclips
+from moviepy.editor import VideoFileClip
 
 # Setup logging
 log = getLogger('movie-merge')
-logger_name = 'movie-merge'
 log_levels = {'DEBUG': DEBUG, 'INFO': INFO, 'WARNING': WARNING, 'ERROR': ERROR}
+logging.getLogger('movie-merge').addHandler(logging.NullHandler())
 
 # Default log level setup
 log.setLevel(DEBUG)  # Set the default level to DEBUG to allow filtering later
@@ -25,10 +27,14 @@ stream_handler.setFormatter(formatter)
 log.addHandler(stream_handler)
 
 from tools import (
-    burn_title_into_first_clip,
+    burn_title_into_clip,
+    concatenate_clips,
+    create_title_card,
     extract_datetime,
     get_directory_info,
     get_video_files_in_directory,
+    sort_clips_by_date,
+    write_output_file,
 )
 
 
@@ -83,6 +89,9 @@ def getArguments():
                         type=str,
                         default='1',
                         help='Number of threads to use for ffmpeg. Can speed up the writing of the video on multicore computers.')
+    parser.add_argument('--dry-run',
+                        action='store_true',
+                        help='Run in dry-run mode without processing any files')
 
     args = parser.parse_args()
     try:
@@ -93,20 +102,24 @@ def getArguments():
     return args
 
 class Clip:
-    def __init__(self, video_path, threads=1) -> None:
+    def __init__(self, video_path, threads=1, dry_run=False) -> None:
         self.video_path = Path(video_path)
         self.file_name = self.video_path.name
         self.file_ext = self.video_path.suffix
+        self.dry_run = dry_run
         self.resolution = self.get_resolution()
         self.fps = self.get_fps()
+
         self.target_resolution = (1920, 1080)
         self.mts_path = None
-        self.creation_date = extract_datetime(self.video_path)  # Use extract_datetime
+        self.creation_date = extract_datetime(self.video_path)
         
+        self.rename_file()
+
         if self.file_ext.lower() == '.mts':
             self.convert_and_move(threads)
-        else:
-            self.resize_video()
+        
+        self.resize_video()
 
     def run_ffmpeg(self, cmd, description):
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -198,6 +211,10 @@ class Clip:
             log.debug(f"{self.file_name} already at target resolution.")
             return
 
+        if self.dry_run:
+            log.info(f"[DRY RUN] Would resize {self.file_name} to {self.target_resolution}")
+            return
+
         resized_path = self.video_path.with_name(f"resized_{self.file_name}")
         cmd = [
             'ffmpeg', '-i', str(self.video_path),
@@ -208,6 +225,10 @@ class Clip:
         self.video_path = resized_path
 
     def convert_and_move(self, threads):
+        if self.dry_run:
+            log.info(f"[DRY RUN] Would convert {self.file_name} to .mp4")
+            return
+
         log.info(f"Converting {self.file_name} to .mp4...")
         mp4_path = self.video_path.with_suffix('.mp4')
         cmd = [
@@ -215,7 +236,12 @@ class Clip:
             '-c:v', 'libx264', '-c:a', 'aac', '-threads', str(threads),
             str(mp4_path)
         ]
-        self.run_ffmpeg(cmd, "conversion")
+        try:
+            self.run_ffmpeg(cmd, "conversion")
+        except RuntimeError as e:
+            log.error(f"Failed to convert {self.file_name} to .mp4.")
+            raise e
+        self.file_ext = '.mp4'
         self.move_mts_to_subdir()
         self.video_path = mp4_path
 
@@ -223,7 +249,7 @@ class Clip:
         mts_path = self.video_path
 
         dir_path = mts_path.parent
-        processed_mts_dir = dir_path / "Processed_MTS"
+        processed_mts_dir = dir_path / "ProcessedClips"
         os.makedirs(processed_mts_dir, exist_ok=True)
 
         new_path = processed_mts_dir / mts_path.name
@@ -233,6 +259,40 @@ class Clip:
             raise RuntimeError(f"Failed to move file from {mts_path} to {new_path}.") from e
         self.mts_path = new_path
 
+    def rename_file(self):
+        self.ensure_csv_exists()
+        if not re.match(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}", self.file_name):
+            log.debug(f"Original file path before renaming: {self.video_path}")
+            creation_date = self.creation_date.strftime("%Y-%m-%d_%H-%M")
+            new_file_name = f"{creation_date}{self.file_ext.lower()}"
+            new_file_path = self.video_path.with_name(new_file_name)
+            if self.file_ext.isupper():  # Make sure it is lowercase
+                self.file_ext = self.file_ext.lower()
+
+            if self.dry_run:
+                log.info(f"[DRY RUN] Would rename {self.file_name} to {new_file_name}")
+            else:
+                # Save original filename to CSV
+                csv_path = self.video_path.parent / "original_filenames.csv"
+                with open(csv_path, 'a', newline='') as csvfile:
+                    writer = csv.writer(csvfile)
+                    writer.writerow([self.file_name, new_file_name])
+
+                os.rename(self.video_path, new_file_path)
+
+                log.info(f"Renamed file {self.file_name} to {new_file_name}")
+                log.debug(f"File path after renaming: {new_file_path}")
+
+            self.video_path = Path(new_file_path)
+            self.file_name = new_file_name
+    
+    def ensure_csv_exists(self):
+        csv_path = self.video_path.parent / "original_filenames.csv"
+        if not csv_path.exists():
+            with open(csv_path, 'w', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(["Original Filename", "New Filename"])
+
     def video_path_str(self):
         return str(self.video_path)
 
@@ -241,16 +301,6 @@ class Clip:
 
     def output_data(self):
         return { "video_path": f"{self.video_path}", "file_name": f"{self.file_name}", "file_ext": f"{self.file_ext}", "resolution": f"{self.resolution}", "fps": f"{self.fps}", "mts_path": f"{self.mts_path}"}
-
-def rename_file(file, index):
-    # Rename the file with a four-digit number prefix
-    if not re.match(r"^\d{4}_", file.name):
-        new_file_name = f"{index + 1:04d}_{file.name}"
-        new_file_path = file.with_name(new_file_name)
-        os.rename(file, new_file_path)
-        log.info(f"Renamed file {file.name} to {new_file_name}")
-        return new_file_path
-    return file  # Return the original file path if no renaming was done
 
 def get_video_files(sub_directory, threads):
     log.debug("Gathering video files")
@@ -263,84 +313,88 @@ def get_video_files(sub_directory, threads):
 
         # One-line INFO summary for each clip
         mts_info = f", Converted .mts to .mp4, Moved original to {obj.mts_path}" if obj.mts_path else ""
-        log.info(f"Processed Clip: {obj.file_name}, Path: {obj.video_path}, Resolution: {obj.resolution}, FPS: {obj.fps}{mts_info}")
+        log.info(f"Processed clip: {obj.file_name}, Path: {obj.video_path}, Resolution: {obj.resolution}, FPS: {obj.fps}{mts_info}")
 
     sorted_video_files = sort_clips_by_date(video_files)
 
-    for index, obj in enumerate(sorted_video_files):
-        renamed_file = rename_file(obj.video_path, index)
-        obj.video_path = renamed_file  # Update the video_path of the Clip object
-        obj.file_name = renamed_file.name  # Update the file_name of the Clip object
-
+    for obj in sorted_video_files:
         log.debug(obj.output_data())
 
     return sorted_video_files
 
-def concatenate_clips(clips, title):
-    log.debug("Merging video files")
+def process_directory(sub_directory, output_directory, threads, dry_run):
+    # Process the root directory
+    title, nice_title, filmed_date, filmed_year = get_directory_info(sub_directory)
+    if nice_title:
+        try:
+            output_file_name = f"{nice_title}.mp4"
+            temp_output_file_path = output_directory / f"temp_{output_file_name}"
+            final_output_file_path = output_directory / output_file_name
 
-    try:
-        final_clip = concatenate_videoclips(clips, method="compose")
-        return final_clip
-    except Exception as e:
-        raise RuntimeError(f"Failed to create video clip from file {title}.") from e
+            if final_output_file_path.exists():
+                log.info(f"File {final_output_file_path} already exists. Skipping...")
+                return
 
-def write_output_file(final_clip, output_file_path, output_fps, threads, title, description, filmed_date):
-    final_clip.write_videofile(
-        output_file_path, 
-        fps=output_fps, 
-        codec="libx264",
-        preset="fast",
-        threads=threads,
-        write_logfile=False,
-        ffmpeg_params=[
-            "-metadata", f"title={title}",
-            "-metadata", f"description={description}",
-            "-metadata", f"creation_time={filmed_date}T00:00:00"  # Setting time to midnight. Adjust if you have precise time.
-        ]
-    )
+            log.info(f"Processing movie '{nice_title}' from directory {sub_directory}")
 
-def sort_clips_by_date(clips):
-    return sorted(clips, key=lambda clip: clip.creation_date)
+            if dry_run:
+                log.info(f"[DRY RUN] Would process {nice_title}")
+                return
 
-def process_directory(sub_directory, output_directory, threads):
-    title, description, filmed_date, filmed_year = get_directory_info(sub_directory)
-    if not title:
-        log.error(f"No title found for directory {sub_directory}. Skipping...")
-        return
+            # Collect all video files and intro clips for chapters
+            all_clips = []
 
-    nice_title = f"{filmed_year} - {title}"
-    output_file_name = f"{filmed_date} - {title}.mp4"
-    temp_output_file_path = output_directory / f"temp_{output_file_name}"
-    final_output_file_path = output_directory / output_file_name
+            # Process video files in the root directory
+            root_video_files = get_video_files(sub_directory, threads)
+            for video_file in root_video_files:
+                try:
+                    all_clips.append(VideoFileClip(video_file.video_path_str()))
+                except Exception as e:
+                    log.error(f"Error processing video file {video_file.file_name}: {str(e)}")
 
-    if final_output_file_path.exists():
-        log.info(f"File {final_output_file_path} already exists. Skipping...")
-        return
+            # Process subdirectories as chapters
+            for entry in sub_directory.iterdir():
+                if entry.is_dir():
 
-    log.info(f"Processing movie '{nice_title}' from directory {sub_directory}")
+                    log.debug(f"Processing directory entry {entry}")
+                    # chapter_title, chapter_nice_title, chapter_filmed_date, _ = get_directory_info(entry)
+                    chapter_title, chapter_nice_title, chapter_filmed_date, chapter_year = get_directory_info(entry)
 
-    # Sort and rename clips
-    video_files = get_video_files(sub_directory, threads)
+                    if chapter_title:
+                        chapter_intro_clip = create_title_card(chapter_nice_title)
+                        all_clips.append(chapter_intro_clip)
 
-    intro_clip = burn_title_into_first_clip(video_files[0], nice_title)
-    clips = [VideoFileClip(video_file.video_path_str()) for video_file in video_files]
-    clips.insert(0, intro_clip)
-    final_clip = concatenate_clips(clips, nice_title)
+                        # Get video files from the chapter subdirectory
+                        chapter_video_files = get_video_files(entry, threads)
+                        for video_file in chapter_video_files:
+                            all_clips.append(VideoFileClip(video_file.video_path_str()))
+                    else:
+                        log.warning(f"No valid title or date found for chapter directory {entry}. Skipping...")
+                else:
+                    log.debug(f"Skipping non-directory entry {entry}")
 
-    output_fps = video_files[0].fps
-    log.info(f"Writing file {final_output_file_path}. FPS: {output_fps}")
-    write_output_file(
-        final_clip,
-        str(temp_output_file_path),
-        output_fps,
-        threads,
-        nice_title,
-        description,
-        filmed_date
-    )
-
-    temp_output_file_path.rename(final_output_file_path)
+            if all_clips:
+                # Create the final movie
+                first_clip = burn_title_into_clip(all_clips[0], nice_title)  # Create a title card for the intro clip
+                final_clip = concatenate_clips(all_clips[1:], first_clip, nice_title)  # Pass all clips except the first one
+                output_fps = root_video_files[0].fps if root_video_files else 24  # Fallback FPS
+                log.info(f"Writing file {final_output_file_path}. FPS: {output_fps}")
+                write_output_file(
+                    final_clip,
+                    str(temp_output_file_path),
+                    output_fps,
+                    threads,
+                    nice_title,
+                    filmed_date
+                )
+                temp_output_file_path.rename(final_output_file_path)
+            else:
+                log.warning(f"No video files found for movie '{nice_title}'. Skipping...")
+        except Exception as e:
+            log.error(f"Error processing directory {sub_directory}: {str(e)}")
+            log.exception("Traceback:")
+    else:
+        log.error(f"No title found for root directory {sub_directory}. Skipping...")
 
 def main():
     arguments = getArguments()
@@ -350,6 +404,8 @@ def main():
         log_level = INFO
 
     log.setLevel(log_level)
+
+    dry_run = arguments.dry_run
 
     input_directory = Path(arguments.input)
     output_directory = Path(arguments.output)
@@ -375,7 +431,7 @@ def main():
             for sub_directory in year_directory.iterdir():
                 if sub_directory.is_dir():
                     try:
-                        process_directory(sub_directory, output_directory, threads)
+                        process_directory(sub_directory, output_directory, threads, dry_run)
                     except Exception as e:
                         log.error(f"Error processing directory {sub_directory}: {e}")
 
